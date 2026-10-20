@@ -1,0 +1,84 @@
+# Research: Document Upload and Management
+
+All Technical Context items were resolved from the existing code base and the stakeholder document; no `NEEDS CLARIFICATION` items remain.
+
+## R-1: Schema management (EnsureCreated vs. migrations)
+
+- **Decision**: Add EF Core migrations (a baseline `InitialCreate` capturing today's model, then `AddDocuments`) and replace `EnsureCreated()` with `Database.Migrate()` at startup.
+- **Rationale**: `Program.cs` uses `EnsureCreated()`, which creates the schema only when the database is empty and never adds new tables to the existing `ContosoDashboard.db`. The constitution requires migrations for schema changes. `Microsoft.EntityFrameworkCore.Tools` is already referenced.
+- **Alternatives considered**: Keep `EnsureCreated()` and tell users to delete the database (fragile, repeats for every change); hand-written `CREATE TABLE` at startup (bypasses EF, drifts from the model).
+- **Consequence**: The existing local database has no migration history, so it must be deleted once; seeded sample data is recreated by the baseline migration.
+
+## R-2: File storage abstraction and layout
+
+- **Decision**: `IFileStorageService` with `UploadAsync`, `DownloadAsync`, `DeleteAsync`, `GetUrlAsync` (see [contracts/file-storage-service.md](./contracts/file-storage-service.md)). Local implementation writes beneath a configurable root (default `AppData/uploads` relative to the content root). Storage key: `{userId}/{projectId|"personal"}/{guid}{.ext}`.
+- **Rationale**: Matches the stakeholder design and constitution III; the same key works as an Azure blob name. Keys are relative and provider-neutral, so the database schema does not change on migration.
+- **Path safety**: The local provider resolves the full path and rejects any key that escapes the root; extensions come from a whitelist, never from user input directly; user filenames are never part of the path.
+- **`GetUrlAsync`**: The local provider throws `NotSupportedException` because local files are never exposed by URL; the application always streams through authorized endpoints. A future Azure provider may return a short-lived URL only after authorization.
+- **Alternatives considered**: Storing files in SQLite as BLOBs (bloats the database, harder to migrate to blob storage); storing under `wwwroot` (violates security requirement).
+
+## R-3: Upload workflow and failure handling
+
+- **Decision**: Validate (size, extension, signature, required metadata) → authorize (project membership) → malware scan → generate storage key → save file → insert metadata → notify. If the metadata insert fails, delete the just-written file. Replacement writes the new file first, updates the record, then deletes the old file (a failed old-file delete is logged, not surfaced).
+- **Rationale**: Satisfies FR-008 (no orphaned records) and the stakeholder sequence "generate unique path → save file → save metadata". Compensating delete prevents orphaned files.
+- **Blazor input**: `InputFile` with `maxAllowedSize` of 25 MB; capture name/size/content type first, copy the stream into a `MemoryStream`, then clear the browser-file reference; files in a multi-file selection are processed sequentially and reported individually (FR-001, US1 scenario 6). `@key` on `InputFile` resets it after success.
+- **Alternatives considered**: Streaming directly to disk (cannot scan or sniff first without re-reading); parallel uploads (memory pressure in a server-side circuit).
+
+## R-4: File validation
+
+- **Decision**: Three checks: size (> 0 and ≤ 25 MB), extension whitelist (`.pdf .doc .docx .xls .xlsx .ppt .pptx .txt .jpg .jpeg .png`), and content signature that must agree with the extension (PDF `%PDF`, PNG/JPEG magic bytes, OOXML ZIP header, legacy Office OLE header; `.txt` must contain no NUL bytes). The client-supplied content type is stored as metadata but not trusted. MIME type is derived server-side from the extension.
+- **Rationale**: Extension-only checks are trivially bypassed (constitution I). Signature checks need no external dependency.
+- **Alternatives considered**: Trusting the browser content type (spoofable); a third-party content-inspection library (new dependency, not needed for this scope).
+
+## R-5: Malware scanning
+
+- **Decision**: `IMalwareScanner.ScanAsync(Stream, fileName)` returns clean/infected with a reason; the training build registers `NoOpMalwareScanner` (always clean). Upload rejects flagged files and writes a log entry.
+- **Rationale**: Stakeholder-confirmed (spec FR-006). Keeps the offline constraint while leaving a seam for a real engine.
+- **Alternatives considered**: Bundling an antivirus engine (not offline-friendly, heavy); skipping scanning (violates the requirement).
+
+## R-6: Authorization model
+
+- **Decision**: A single `DocumentAccess` component evaluates a user context (id, role, department, managed/member project ids) and provides (a) `CanView/CanEdit/CanDelete/CanShare(document)` and (b) an `IQueryable<Document>` filter for lists, search, and counts. Rules:
+  - **View/download/preview**: Administrator; uploader; the project's manager or members; direct or department share recipient; a `TeamLead` for documents uploaded by users in the same department, except `Personal Files` documents with no project that are not shared with that Team Lead (clarification 2026-10-20).
+  - **Edit/replace/delete**: Administrator; uploader; project manager of the document's project; a `TeamLead` for documents they can manage under the rule above. Share recipients get view/download only.
+  - **Share**: owner and Administrator.
+- **Rationale**: One rule set used for both single-item and list paths prevents the classic bug where search or a count leaks documents a direct request would block (constitution I).
+- **Failure behavior**: Unauthorized and nonexistent identifiers are indistinguishable (404 for endpoints; "not found" result in the service).
+- **Alternatives considered**: ASP.NET resource-based `IAuthorizationHandler` (more ceremony for the same rules; lists still need a query filter); per-page checks (duplicated, error-prone).
+
+## R-7: Serving, download, and preview
+
+- **Decision**: Minimal-API endpoints `GET /documents/{id}/download` and `GET /documents/{id}/preview`, both `RequireAuthorization()`, streaming from `IFileStorageService` after `DocumentService` authorization and activity logging. Preview is allowed only for PDF/JPEG/PNG and sets `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`; because the global header is `X-Frame-Options: DENY`, the preview route overrides it with `SAMEORIGIN` so an in-page frame can render it (the existing CSP `default-src 'self'` already permits same-origin frames, objects, and images). Download always uses `attachment` with the original filename sanitized.
+- **Rationale**: Files are outside `wwwroot`, so static serving is impossible by design; endpoints enable authorization checks and auditing.
+- **Alternatives considered**: Blazor-side base64 data URLs (heavy for 25 MB, bypass endpoint auditing); relaxing the global frame policy (weakens every page).
+
+## R-8: Data model choices
+
+- **Decision**: Integer keys (consistent with `User`/`Project`), `Category` stored as text validated against a fixed list, `FileType` max length 255, `FilePath` max length 500, tags in a single delimited text column (normalized lowercase, comma-separated). One `DocumentShare` table with either `SharedWithUserId` or `SharedWithDepartment` set. Task link is a nullable `TaskId` on `Document` (one task per document); attaching to a task sets `ProjectId` to the task's project. See [data-model.md](./data-model.md).
+- **Rationale**: Matches stakeholder constraints; simplest structure satisfying the spec (constitution V). SQLite `LIKE` is case-insensitive for ASCII, which satisfies case-insensitive tag search.
+- **Alternatives considered**: Tag and DocumentTag tables (extra joins, no requirement for tag management); one share row per department member (requires fan-out and breaks when membership changes); many-to-many Document–Task (spec only requires attaching to a task).
+
+## R-9: Search and list performance
+
+- **Decision**: Database-side filtering and sorting using the access filter plus `LIKE` over title, description, tags, uploader display name, and project name; indexes on `UploaderUserId`, `ProjectId`, `TaskId`, `UploadDate`, `Category`; share indexes on `(SharedWithUserId)` and `(SharedWithDepartment)`; paging at 50 rows. Meets the 2-second target at the 500-document scale.
+- **Alternatives considered**: SQLite FTS (unneeded at this scale, complicates migrations); in-memory filtering (does not scale and risks leaking un-filtered data).
+
+## R-10: Notifications
+
+- **Decision**: Append `DocumentShared` and `DocumentAdded` to `NotificationType` (stored as integers, so appending is backward compatible) and create notifications through the existing `INotificationService`. Sharing with a department notifies every user in that department; a new project document notifies project members and the manager except the uploader. Respect the user's `InAppNotificationsEnabled` setting.
+- **Alternatives considered**: A separate document-notification mechanism (duplicates existing behavior).
+
+## R-11: Audit and reporting
+
+- **Decision**: `DocumentActivity` rows for Upload, Download, Preview, Edit, Replace, Delete, Share; the row keeps `DocumentId` as a plain value plus a title snapshot so history survives deletion. `DocumentReportService` exposes three queries (by file type, by uploader, access patterns by day/action) to an Administrator-only page.
+- **Alternatives considered**: Logging only to the application log (not queryable for reports); foreign key with cascade delete (would erase audit history).
+
+## R-12: Claims and task integration
+
+- **Decision**: Add the `Department` claim at login (it is missing today) and keep the user id claim as the identity source. Add `TaskDetails.razor` (`/tasks/{taskId:int}`) because the existing Tasks page has no detail view (its handler is a TODO); the page lists attached documents and offers upload/attach, using `ITaskService.GetTaskByIdAsync` for authorization of task access.
+- **Alternatives considered**: A modal on the Tasks list (the list page is already constrained and the spec says "task detail page").
+
+## R-13: Testing approach
+
+- **Decision**: xUnit project with SQLite in-memory databases and a temporary-directory storage root. Priorities: access matrix, upload validation and failure cleanup, storage path safety, search/list filtering, share and notification behavior. UI flows are covered by the manual checks in [quickstart.md](./quickstart.md).
+- **Alternatives considered**: EF InMemory provider (does not enforce relational behavior such as foreign keys or `LIKE` semantics).
