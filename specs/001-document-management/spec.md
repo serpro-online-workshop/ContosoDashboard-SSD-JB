@@ -8,6 +8,12 @@
 
 **Input**: User description: "Document upload and management feature for ContosoDashboard, per StakeholderDocs/document-upload-and-management-feature.md"
 
+## Clarifications
+
+### Session 2026-10-20
+
+- Q: Can Team Leads see their team members' "Personal Files" documents that are not linked to a project or shared? → A: No — private to the owner (and Administrators) unless shared.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Upload a Document with Metadata (Priority: P1)
@@ -79,7 +85,7 @@ When viewing a project, team members see all documents associated with it. Proje
 
 1. **Given** a project with documents, **When** any project member views the project, **Then** all its documents are listed and downloadable.
 2. **Given** a Project Manager of a project, **When** they upload or delete any document in that project, **Then** the action succeeds.
-3. **Given** a Team Lead, **When** they view documents, **Then** they can view and manage documents uploaded by their team members.
+3. **Given** a Team Lead, **When** they view documents, **Then** they can view and manage documents uploaded by their team members, except unshared, project-unlinked "Personal Files", which remain private to the owner and Administrators.
 4. **Given** an Administrator, **When** they browse documents, **Then** they can access all documents.
 5. **Given** a user who is not a member of a project, **When** they try to access that project's documents, **Then** access is denied.
 
@@ -176,7 +182,7 @@ Document activity is logged, and Administrators can generate reports on document
 - **FR-014**: Users MUST be able to download any document they have access to and preview PDFs and images in the browser.
 - **FR-015**: Uploaders MUST be able to edit title, description, category, and tags and replace the file of their own documents.
 - **FR-016**: Uploaders MUST be able to delete their own documents, and Project Managers MUST be able to delete any document in their projects; deletion requires confirmation and permanently removes both the record and the stored file.
-- **FR-017**: Access rules by role MUST be: Employees access their own documents and documents of projects they belong to; Team Leads additionally view and manage documents uploaded by their team members; Project Managers manage all documents in their projects; Administrators access all documents.
+- **FR-017**: Access rules by role MUST be: Employees access their own documents and documents of projects they belong to; Team Leads additionally view and manage documents uploaded by their team members, except documents in the "Personal Files" category that are not linked to a project or shared with them (those stay private to the owner and Administrators); Project Managers manage all documents in their projects; Administrators access all documents.
 - **FR-018**: Every document operation (view, download, preview, edit, replace, delete, share) MUST verify authorization on the server for the specific document, regardless of how the request was made.
 
 **Sharing**
