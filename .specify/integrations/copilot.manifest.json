@@ -1,7 +1,7 @@
 {
   "integration": "copilot",
-  "version": "1.2.1.dev0",
-  "installed_at": "2026-10-20T17:57:00.768832+00:00",
+  "version": "1.2.2",
+  "installed_at": "2026-10-20T18:59:04.316582+00:00",
   "files": {
     ".github/agents/speckit.analyze.agent.md": "922bba5586564529936c0e40a10e1bcaf2ff4c963863fb0d084247ab1b26aabf",
     ".github/agents/speckit.clarify.agent.md": "d4f0d5f326e95953cad5febad246c37365e5597384c4d81654e133db70728fbb",
