@@ -33,5 +33,5 @@
 
 ## Notes
 
-- Malware scanning clarified with the stakeholder: pluggable scan step, stub scanner in the training build.
+- Malware scanning clarified with the stakeholder: pluggable scan step, stub scanner in the training build; later directed to run as an asynchronous background job (Azure Functions + Queue Storage in the cloud, in-process in training) with quarantine until clean.
 - Implementation notes from the stakeholder document are deferred to `/speckit.plan`.

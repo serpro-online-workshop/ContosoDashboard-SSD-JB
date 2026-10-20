@@ -19,10 +19,10 @@ All Technical Context items were resolved from the existing code base and the st
 
 ## R-3: Upload workflow and failure handling
 
-- **Decision**: Validate (size, extension, signature, required metadata) → authorize (project membership) → malware scan → generate storage key → save file → insert metadata → notify. If the metadata insert fails, delete the just-written file. Replacement writes the new file first, updates the record, then deletes the old file (a failed old-file delete is logged, not surfaced).
+- **Decision**: Validate (size, extension, signature, required metadata) → authorize (project membership) → generate storage key → save file → insert metadata as `Pending` → enqueue a scan request → return "uploaded, scanning". If the metadata insert fails, delete the just-written file. Replacement writes the new file first, updates the record (back to `Pending`), then deletes the old file (a failed old-file delete is logged, not surfaced). Malware scanning is asynchronous (R-5, R-14).
 - **Rationale**: Satisfies FR-008 (no orphaned records) and the stakeholder sequence "generate unique path → save file → save metadata". Compensating delete prevents orphaned files.
 - **Blazor input**: `InputFile` with `maxAllowedSize` of 25 MB; capture name/size/content type first, copy the stream into a `MemoryStream`, then clear the browser-file reference; files in a multi-file selection are processed sequentially and reported individually (FR-001, US1 scenario 6). `@key` on `InputFile` resets it after success.
-- **Alternatives considered**: Streaming directly to disk (cannot scan or sniff first without re-reading); parallel uploads (memory pressure in a server-side circuit).
+- **Alternatives considered**: Streaming directly to disk (cannot sniff the signature first without re-reading); parallel uploads (memory pressure in a server-side circuit).
 
 ## R-4: File validation
 
@@ -30,11 +30,11 @@ All Technical Context items were resolved from the existing code base and the st
 - **Rationale**: Extension-only checks are trivially bypassed (constitution I). Signature checks need no external dependency.
 - **Alternatives considered**: Trusting the browser content type (spoofable); a third-party content-inspection library (new dependency, not needed for this scope).
 
-## R-5: Malware scanning
+## R-5: Malware scanning (scanner abstraction)
 
-- **Decision**: `IMalwareScanner.ScanAsync(Stream, fileName)` returns clean/infected with a reason; the training build registers `NoOpMalwareScanner` (always clean). Upload rejects flagged files and writes a log entry.
+- **Decision**: `IMalwareScanner.ScanAsync(Stream, fileName)` returns clean/infected with a reason; the training build registers `NoOpMalwareScanner` (always clean). The scanner is invoked by a background worker, not on the request path (see R-14); a flagged file is deleted and its document rejected, with a log entry.
 - **Rationale**: Stakeholder-confirmed (spec FR-006). Keeps the offline constraint while leaving a seam for a real engine.
-- **Alternatives considered**: Bundling an antivirus engine (not offline-friendly, heavy); skipping scanning (violates the requirement).
+- **Alternatives considered**: Bundling an antivirus engine (not offline-friendly, heavy); skipping scanning (violates the requirement); scanning inline during upload (blocks the Blazor circuit for large files and cannot use cloud scanners).
 
 ## R-6: Authorization model
 
@@ -65,12 +65,12 @@ All Technical Context items were resolved from the existing code base and the st
 
 ## R-10: Notifications
 
-- **Decision**: Append `DocumentShared` and `DocumentAdded` to `NotificationType` (stored as integers, so appending is backward compatible) and create notifications through the existing `INotificationService`. Sharing with a department notifies every user in that department; a new project document notifies project members and the manager except the uploader. Respect the user's `InAppNotificationsEnabled` setting.
+- **Decision**: Append `DocumentShared`, `DocumentAdded`, and `DocumentRejected` to `NotificationType` (stored as integers, so appending is backward compatible) and create notifications through the existing `INotificationService`. Sharing with a department notifies every user in that department; a project document notifies project members and the manager except the uploader once the document becomes `Available`; a rejected scan notifies the uploader. Respect the user's `InAppNotificationsEnabled` setting.
 - **Alternatives considered**: A separate document-notification mechanism (duplicates existing behavior).
 
 ## R-11: Audit and reporting
 
-- **Decision**: `DocumentActivity` rows for Upload, Download, Preview, Edit, Replace, Delete, Share; the row keeps `DocumentId` as a plain value plus a title snapshot so history survives deletion. `DocumentReportService` exposes three queries (by file type, by uploader, access patterns by day/action) to an Administrator-only page.
+- **Decision**: `DocumentActivity` rows for Upload, Download, Preview, Edit, Replace, Delete, Share, and scan outcomes (ScanCompleted, ScanRejected, ScanFailed); the row keeps `DocumentId` as a plain value plus a title snapshot so history survives deletion. `DocumentReportService` exposes three queries (by file type, by uploader, access patterns by day/action) to an Administrator-only page.
 - **Alternatives considered**: Logging only to the application log (not queryable for reports); foreign key with cascade delete (would erase audit history).
 
 ## R-12: Claims and task integration
@@ -81,4 +81,16 @@ All Technical Context items were resolved from the existing code base and the st
 ## R-13: Testing approach
 
 - **Decision**: xUnit project with SQLite in-memory databases and a temporary-directory storage root. Priorities: access matrix, upload validation and failure cleanup, storage path safety, search/list filtering, share and notification behavior. UI flows are covered by the manual checks in [quickstart.md](./quickstart.md).
-- **Alternatives considered**: EF InMemory provider (does not enforce relational behavior such as foreign keys or `LIKE` semantics).
+- **Alternatives considered**: EF InMemory provider (does not enforce relational behavior such as foreign keys or `LIKE` semantics). Scan-pipeline tests (state machine, idempotency, stale verdicts, timeout, restart recovery) run against the in-process mode with a fake scanner; the Azure mode gets contract tests with Azurite in the cloud phase.
+
+## R-14: Asynchronous scanning with Azure Functions and Queue Storage
+
+- **Decision**: Upload stores the file and a `Pending` document, then enqueues a small JSON `ScanRequest`. In the cloud deployment an Azure Function with a `QueueTrigger` on `document-scan-requests` streams the file from blob storage, runs the scanning engine, and writes a `ScanVerdictMessage` to `document-scan-results` through a queue output binding; a hosted listener in the web app applies verdicts. The document is quarantined (inaccessible) until `Clean`. In the training build the same contract runs in-process (`Channel` + `BackgroundService`) with the no-op scanner, so offline use needs no Azure services (constitution III). Full contract: [contracts/scan-pipeline.md](./contracts/scan-pipeline.md).
+- **Rationale**:
+  - Scanning a 25 MB file inline blocks the Blazor circuit and cannot use cloud scanners; a queue decouples upload latency from scan time and allows retry.
+  - A results queue (instead of a callback HTTP endpoint or direct database access) means the Function needs no database credentials and the web app exposes no new inbound surface; the app validates `documentId` + `scanAttemptId` before applying any verdict.
+  - Quarantine-until-clean keeps the security guarantee of "scan before access" while the work is asynchronous.
+  - Queue Storage fits the need (simple at-least-once delivery, built-in retries and poison queue, Azurite for local dev); verdict application is idempotent so duplicate delivery is harmless.
+- **Failure handling**: the Functions host retries (default 5 dequeues) then poison-queues the request; the web app's timeout sweeper marks documents `Pending` longer than 15 minutes as `ScanFailed` (fail closed) and allows retry with a new attempt id. In-process mode re-enqueues `Pending` documents on startup.
+- **Alternatives considered**: Service Bus (richer features, more cost/complexity than needed); Event Grid blob-created trigger (no request/verdict correlation to our document model); Function calling an authenticated web API callback (new inbound endpoint, needs secrets/token handling); inline synchronous scan (see rationale); Defender for Storage alone (can be the scanner engine inside the function, but we still need the verdict flow back to the app).
+- **Scope note**: This feature delivers the quarantine workflow, queue contract, and in-process mode. The Azure implementation (`AzureStorageScanQueue`, result listener, `DocumentScanFunction`) and `AzureBlobStorageService` are delivered together in the cloud-migration phase in separate projects, keeping the training build free of Azure SDK dependencies.

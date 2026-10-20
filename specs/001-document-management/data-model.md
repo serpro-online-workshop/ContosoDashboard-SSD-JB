@@ -20,16 +20,22 @@ Conventions follow the existing models: integer identity keys, `DateTime` values
 | TaskId | int? (FK → TaskItem) | Optional; `SetNull` on task delete; when set, `ProjectId` equals the task's project |
 | UploadDate | DateTime | Set at creation |
 | UpdatedDate | DateTime | Set on edit/replace |
+| ScanStatus | string(20) | `Pending`, `Available`, `Rejected`, `ScanFailed`; new documents start `Pending` |
+| ScanAttemptId | Guid | Regenerated on upload, replace, and scan retry; a verdict applies only if it matches |
+| ScanRequestedDate | DateTime | When the current scan was queued (used by the timeout sweeper) |
+| ScanCompletedDate | DateTime? | Set when a verdict is applied |
+| ScanDetail | string(500)? | User-safe reason for `Rejected` / `ScanFailed` |
 
-**Indexes**: `UploaderUserId`, `ProjectId`, `TaskId`, `UploadDate`, `Category`, unique `FilePath`.
+**Indexes**: `UploaderUserId`, `ProjectId`, `TaskId`, `UploadDate`, `Category`, `(ScanStatus, ScanRequestedDate)`, unique `FilePath`.
 
 **Validation rules**
 - Title required; Category must be in the fixed list.
 - Uploader must be a member or manager of `ProjectId` (or Administrator) when a project is set.
 - File extension must be in the whitelist and the file signature must match it.
 - `FilePath` is generated before insertion, so it is never empty or duplicated.
+- Only `Available` documents are served, searchable by others, shared, attached, counted, or notified about.
 
-**State transitions**: Created (upload) → Edited (metadata) / Replaced (file) → Shared (adds `DocumentShare` rows) → Deleted (record and file permanently removed; shares removed by cascade; activity history retained).
+**State transitions**: Created (upload) → `Pending` → `Available` (clean verdict) | `Rejected` (infected; file deleted) | `ScanFailed` (error/timeout; retry → `Pending`). Available → Edited (metadata, stays Available) / Replaced (file; back to `Pending`) → Shared (adds `DocumentShare` rows) → Deleted (record and file permanently removed; shares removed by cascade; activity history retained). See [contracts/scan-pipeline.md](./contracts/scan-pipeline.md).
 
 ## DocumentShare
 
@@ -53,7 +59,7 @@ Conventions follow the existing models: integer identity keys, `DateTime` values
 | DocumentTitle | string(255) | Snapshot at time of action |
 | FileType | string(255)? | Snapshot, used by the file-type report |
 | UserId | int (FK → User) | Actor; `Restrict` |
-| Action | string(20) | `Upload`, `Download`, `Preview`, `Edit`, `Replace`, `Delete`, `Share` |
+| Action | string(20) | `Upload`, `Download`, `Preview`, `Edit`, `Replace`, `Delete`, `Share`, `ScanCompleted`, `ScanRejected`, `ScanFailed` |
 | Timestamp | DateTime | Set at creation |
 | Details | string(500)? | E.g., share target |
 
@@ -61,7 +67,7 @@ Conventions follow the existing models: integer identity keys, `DateTime` values
 
 ## Changes to existing entities
 
-- **Notification / NotificationType**: append `DocumentShared` and `DocumentAdded` to the end of the enum (integer-backed, so existing values are unchanged).
+- **Notification / NotificationType**: append `DocumentShared`, `DocumentAdded`, and `DocumentRejected` to the end of the enum (integer-backed, so existing values are unchanged).
 - **User**: add `Documents` navigation (uploaded documents); no new columns. `Department` (already present) defines "team".
 - **Project**: add `Documents` navigation; **TaskItem**: add `Documents` navigation.
 - **Claims (not schema)**: login adds a `Department` claim.
@@ -77,4 +83,4 @@ Document 1─* DocumentActivity (by DocumentId value, no FK)
 
 ## Access query shape (informational)
 
-A user can view a document when any of these holds: they are an Administrator; they uploaded it; they manage or belong to its project; a share targets them or their department; or they are a `TeamLead` and the uploader shares their department, except a no-project, unshared `Personal Files` document. The same predicate is used for single-document checks and list/search/count queries.
+A user can view a document when its `ScanStatus` is `Available` and any of these holds: they are an Administrator; they uploaded it; they manage or belong to its project; a share targets them or their department; or they are a `TeamLead` and the uploader shares their department, except a no-project, unshared `Personal Files` document. The uploader and Administrators additionally see non-available rows (status only) in list views. The same predicate is used for single-document checks and list/search/count queries.

@@ -6,8 +6,8 @@ Both require an authenticated user (`RequireAuthorization()`); identity comes fr
 
 | Route | Method | Success | Not found / not permitted | Notes |
 |-------|--------|---------|---------------------------|-------|
-| `/documents/{id:int}/download` | GET | 200 file stream, `Content-Disposition: attachment` with sanitized original filename, stored MIME type, `X-Content-Type-Options: nosniff` | 404 (same response for missing and unauthorized) | Logs a `Download` activity |
-| `/documents/{id:int}/preview` | GET | 200 file stream, `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` (this route only) | 404; 415 if the type is not previewable (only PDF, JPEG, PNG) | Logs a `Preview` activity |
+| `/documents/{id:int}/download` | GET | 200 file stream, `Content-Disposition: attachment` with sanitized original filename, stored MIME type, `X-Content-Type-Options: nosniff` | 404 (same response for missing, unauthorized, and not-yet-`Available` documents) | Logs a `Download` activity |
+| `/documents/{id:int}/preview` | GET | 200 file stream, `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` (this route only) | 404 (as above); 415 if the type is not previewable (only PDF, JPEG, PNG) | Logs a `Preview` activity |
 
 Unauthenticated requests are redirected to `/login` by the existing cookie configuration. Cache headers: `Cache-Control: private, no-store` on both routes.
 
@@ -25,7 +25,11 @@ Navigation: `NavMenu.razor` gains "Documents" for all users and "Document Report
 
 ## Notifications (existing page)
 
-Two new notification types appear on `/notifications`: `DocumentShared` ("{user} shared '{title}' with you") and `DocumentAdded` ("New document '{title}' added to {project}").
+Three new notification types appear on `/notifications`: `DocumentShared` ("{user} shared '{title}' with you"), `DocumentAdded` ("New document '{title}' added to {project}", sent once the scan is clean), and `DocumentRejected` ("'{title}' was rejected by the security scan", sent to the uploader).
+
+## Scan status in the UI
+
+Document lists show a status badge for the uploader/Administrators: *Scanning* (with auto-refresh while any document is pending), *Available*, *Rejected* (reason shown, delete action), *Scan failed* (Retry and Delete actions). Download/preview/share actions are disabled until *Available*. The upload dialog confirms "Uploaded — scanning for malware" rather than "available".
 
 ## Upload form contract (UI)
 
@@ -42,4 +46,4 @@ A progress indicator is shown while a file is transferring; success and error me
 
 ## Configuration surface
 
-`appsettings.json` → `DocumentStorage` (see [file-storage-service.md](./file-storage-service.md)). No new secrets.
+`appsettings.json` → `DocumentStorage` (see [file-storage-service.md](./file-storage-service.md)) and `MalwareScan` (see [scan-pipeline.md](./scan-pipeline.md)). No new secrets.

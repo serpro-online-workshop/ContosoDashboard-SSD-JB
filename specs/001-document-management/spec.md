@@ -13,6 +13,7 @@
 ### Session 2026-10-20
 
 - Q: Can Team Leads see their team members' "Personal Files" documents that are not linked to a project or shared? → A: No — private to the owner (and Administrators) unless shared.
+- Directive: Malware scanning runs as an asynchronous background job after upload (cloud deployment: Azure Functions triggered by Azure Queue Storage; training build: in-process background worker behind the same queue contract). Files are quarantined until the scan reports clean.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -33,6 +34,9 @@ An employee selects one or more files from their computer, provides a title, cat
 5. **Given** an employee uploading to a project, **When** they are not a member of that project, **Then** the upload is refused.
 6. **Given** an employee, **When** they select several valid files at once, **Then** each file is uploaded and reported on individually, so one failure does not block the others.
 7. **Given** a title is missing or no category is chosen, **When** the user submits, **Then** the upload is blocked with a message identifying the missing field.
+8. **Given** a file was just uploaded, **When** its malware scan has not finished, **Then** the uploader sees it marked "Scanning", and nobody can view, download, preview, or share it yet.
+9. **Given** a file in "Scanning" state, **When** the scan reports clean, **Then** the document becomes available according to its normal access rules.
+10. **Given** a file in "Scanning" state, **When** the scan flags it, **Then** the file is removed, the document is marked "Rejected" with a reason visible only to the uploader, and the uploader is notified.
 
 ---
 
@@ -121,7 +125,7 @@ Users see and attach documents from a task's detail page, upload directly from a
 1. **Given** a task detail page, **When** the user uploads or attaches a document, **Then** it appears with the task and is automatically associated with the task's project.
 2. **Given** the dashboard home, **When** it loads, **Then** a Recent Documents widget shows the user's last 5 uploads.
 3. **Given** the dashboard summary cards, **When** the page loads, **Then** a document count is shown.
-4. **Given** a new document is added to a project, **When** the upload completes, **Then** the project's members receive an in-app notification.
+4. **Given** a new document is added to a project, **When** it becomes available (scan clean), **Then** the project's members receive an in-app notification.
 
 ---
 
@@ -146,7 +150,11 @@ Document activity is logged, and Administrators can generate reports on document
 - Upload fails midway (network drop or storage error): no partial or orphaned document record remains, and the user sees an error.
 - A file has a permitted extension but disallowed content, or an unsafe/duplicate filename: the system never uses the user-supplied name as a storage location and handles duplicates without overwriting other files.
 - A file is exactly 25 MB (accepted) or 0 bytes (rejected).
-- The malware scan step flags a file: the upload is rejected and the user is told why.
+- The malware scan flags a file after upload: the stored file is deleted, the document is marked "Rejected", and the uploader is notified; it never becomes visible to anyone else.
+- The scan does not finish in time, or the scanner fails: the document stays unavailable (fail closed), is shown as "Scan failed", and the uploader or an Administrator can retry the scan or delete it.
+- The same scan result arrives twice, or arrives for a file that has since been replaced: it is ignored.
+- A file is replaced while the previous version is available: the document is unavailable until the new file's scan is clean.
+- A document is deleted while its scan is pending: the later scan result is ignored.
 - A user loses project membership: access to that project's documents follows current membership; documents are not exposed to former members.
 - A document shared with a user is later deleted by the owner: it disappears from the recipient's "Shared with Me".
 - Two users edit or replace the same document at nearly the same time: the last saved change wins and no data is corrupted.
@@ -165,7 +173,8 @@ Document activity is logged, and Administrators can generate reports on document
 - **FR-003**: The system MUST reject files larger than 25 MB with a clear message.
 - **FR-004**: Users MUST provide a title and a category (Project Documents, Team Resources, Personal Files, Reports, Presentations, Other) and MAY provide a description, an associated project, and tags.
 - **FR-005**: The system MUST automatically record upload date/time, uploader, file size, and file type for each document; file type values MUST support up to 255 characters.
-- **FR-006**: The system MUST pass every uploaded file through a pluggable malware-scan step before storage and reject files the step flags. The training build ships with a stub scanner that accepts all files; a real scanner can be substituted without other changes.
+- **FR-006**: The system MUST scan every uploaded or replaced file for malware in an asynchronous background job after upload, and MUST keep the file quarantined (not viewable, downloadable, previewable, shareable, searchable by others, or counted) until the scan reports clean. Flagged files MUST be deleted and the document marked rejected. The scan mechanism MUST be pluggable: in the cloud deployment it runs as a queue-triggered cloud function (Azure Functions with Azure Queue Storage); in the training build it runs in-process with a stub scanner that reports every file clean.
+- **FR-028**: The uploader MUST see each document's scan state (Scanning, Available, Rejected, Scan failed) and be notified if a document is rejected; scans that do not complete within a configurable time MUST fail closed and be retryable by the uploader or an Administrator.
 - **FR-007**: Uploaded files MUST be stored outside any publicly reachable location and be retrievable only through an authorized request.
 - **FR-008**: Stored files MUST be named by system-generated unique identifiers, never by user-supplied names, and the file MUST be saved successfully before its metadata is recorded so no orphaned records exist.
 - **FR-009**: Users MUST only be able to associate a document with a project they are a member of (or manage).
@@ -194,7 +203,7 @@ Document activity is logged, and Administrators can generate reports on document
 
 - **FR-021**: Users MUST be able to view, attach, and upload documents from a task's detail page; documents attached to a task MUST be automatically associated with the task's project.
 - **FR-022**: The dashboard home MUST show a Recent Documents widget with the user's last 5 uploads and a document count in the summary cards.
-- **FR-023**: Project members MUST receive an in-app notification when a new document is added to one of their projects.
+- **FR-023**: Project members MUST receive an in-app notification when a new document becomes available in one of their projects.
 
 **Audit and reporting**
 
@@ -208,7 +217,7 @@ Document activity is logged, and Administrators can generate reports on document
 
 ### Key Entities *(include if feature involves data)*
 
-- **Document**: A stored file with its metadata: title, description, category, original filename, file type, file size, storage location reference, uploader, upload date/time, optional associated project, optional associated task, and tags. Identified by a whole-number identifier consistent with existing users and projects; category is stored as text.
+- **Document**: A stored file with its metadata: title, description, category, original filename, file type, file size, storage location reference, uploader, upload date/time, optional associated project, optional associated task, tags, and scan state (Scanning, Available, Rejected, Scan failed). Identified by a whole-number identifier consistent with existing users and projects; category is stored as text.
 - **Document Share**: A relationship granting a specific user or team access to a document, with who shared it and when.
 - **Document Activity Record**: An audit entry of an action (upload, download, delete, share) by a user on a document at a point in time.
 - **Existing entities used**: User (uploader, role, department/team), Project and project membership (access scope), Task (attachment context), Notification (share and project-document alerts).
@@ -225,6 +234,7 @@ Document activity is logged, and Administrators can generate reports on document
 - **SC-006**: At least 90% of uploaded documents are assigned a meaningful category.
 - **SC-007**: Zero unauthorized document access: in testing, 100% of attempts to view, download, edit, or delete documents outside a user's permissions are denied.
 - **SC-008**: 100% of upload, download, delete, and share actions appear in the activity log.
+- **SC-009**: In normal operation, 95% of uploaded files finish scanning and become available within 2 minutes of upload; 100% of files that have not been scanned clean are inaccessible to everyone except for status display to the uploader.
 
 ## Assumptions
 
@@ -235,7 +245,7 @@ Document activity is logged, and Administrators can generate reports on document
 - Most documents are under 10 MB; the local disk has enough space, and no storage quotas apply.
 - Users already hold the identity information (role, department) the existing login provides.
 - The feature is web-only; mobile apps are out of scope.
-- The malware scanning step is pluggable; the training build uses a stub scanner (confirmed with stakeholder).
+- The malware scan is an asynchronous, pluggable background job; the training build uses an in-process worker with a stub scanner that reports every file clean (confirmed with stakeholder). The cloud deployment uses Azure Functions triggered by Azure Queue Storage.
 - Implementation-level notes in the stakeholder document (integer document IDs, text categories, local file layout, storage interface, Blazor upload patterns, database reset steps) are inputs for `/speckit.plan`, not part of this spec.
 
 ## Out of Scope
@@ -248,4 +258,4 @@ Document activity is logged, and Administrators can generate reports on document
 - Document templates or generation
 - Storage quotas
 - Soft delete / trash with recovery
-- Production-grade malware scanning (deferred to cloud migration; only the pluggable step is in scope)
+- Production-grade malware scanning engine selection and deployment of the cloud function (deferred to cloud migration; the quarantine workflow and queue contract are in scope)

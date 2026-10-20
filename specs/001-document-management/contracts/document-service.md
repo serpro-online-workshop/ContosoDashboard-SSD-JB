@@ -27,6 +27,10 @@ public interface IDocumentService
     Task<OperationResult> AttachToTaskAsync(int documentId, int taskId, UserContext user);
     Task<OperationResult> DetachFromTaskAsync(int documentId, UserContext user);
 
+    // Scanning
+    Task<OperationResult> RetryScanAsync(int documentId, UserContext user);     // only from ScanFailed
+    // IScanResultHandler.ApplyVerdictAsync is also implemented by this service (see scan-pipeline.md)
+
     // Dashboard
     Task<int> GetDocumentCountAsync(UserContext user);
     Task<List<DocumentSummary>> GetRecentDocumentsAsync(int count, UserContext user);   // user's own uploads
@@ -43,17 +47,19 @@ public interface IDocumentService
 
 ## Error codes (user-safe messages)
 
-`NotFound`, `Forbidden` (treated as NotFound for single documents), `FileTooLarge`, `EmptyFile`, `UnsupportedType`, `ContentMismatch`, `MalwareDetected`, `InvalidMetadata`, `NotProjectMember`, `StorageFailure`.
+`NotFound`, `Forbidden` (treated as NotFound for single documents), `FileTooLarge`, `EmptyFile`, `UnsupportedType`, `ContentMismatch`, `InvalidMetadata`, `NotProjectMember`, `NotAvailable` (scan pending/failed/rejected), `StorageFailure`.
 
 ## Behavior rules
 
-1. **Upload**: validate → authorize project → scan → generate key → store file → insert record → write activity → notify project members (`DocumentAdded`). On insert failure, delete the stored file.
-2. **Replace**: validate and scan the new file → store → update record (size, type, original name, updated date) → delete the old file → log `Replace`.
-3. **Delete**: authorize → delete record (shares cascade) → delete file → log `Delete` with title snapshot. Callers must obtain user confirmation first.
-4. **Access**: all read, list, search, and count methods apply the shared access filter described in [data-model.md](../data-model.md) and [research.md](../research.md) (R-6).
-5. **Sharing**: owner or Administrator only; target is a user id or department name; duplicates are ignored; sharing notifies each recipient (`DocumentShared`); shared recipients can view/download only.
-6. **Attach to task**: requires access to the task and edit rights on the document; sets `TaskId` and `ProjectId` (the task's project).
-7. **Activity**: every upload, download, preview, edit, replace, delete, and share creates a `DocumentActivity` row.
+1. **Upload**: validate → authorize project → generate key → store file → insert record with `ScanStatus = Pending` and a new `ScanAttemptId` → enqueue `ScanRequest` → write `Upload` activity. The call returns as soon as the file is queued ("uploaded, scanning"). On insert failure, delete the stored file; if enqueue fails, the document stays `Pending` and the timeout sweeper / startup recovery picks it up. Project-member notification (`DocumentAdded`) is sent when the verdict is `Clean`.
+2. **Replace**: validate → store the new file under a new key → update record (size, type, original name, updated date), set `Pending` with a new `ScanAttemptId`, enqueue → delete the old file → log `Replace`. The document is unavailable until the new file is clean.
+3. **Scan verdict** (`IScanResultHandler.ApplyVerdictAsync`): see [scan-pipeline.md](./scan-pipeline.md). `Clean` → `Available` and notify project members; `Infected` → delete the stored file, `Rejected`, notify the uploader (`DocumentRejected`); `Error` → `ScanFailed`. Each outcome writes a `ScanCompleted` / `ScanRejected` / `ScanFailed` activity row.
+4. **Retry scan**: `RetryScanAsync(documentId, user)` (uploader or Administrator, only from `ScanFailed`) → new `ScanAttemptId`, `Pending`, enqueue.
+5. **Delete**: authorize → delete record (shares cascade) → delete file → log `Delete` with title snapshot. Callers must obtain user confirmation first. Allowed in any scan state (e.g., to remove `Rejected`/`ScanFailed` records); a later verdict for the deleted document is ignored.
+6. **Access**: all read, list, search, and count methods apply the shared access filter described in [data-model.md](../data-model.md) and [research.md](../research.md) (R-6), and only ever return `Available` documents, except that the uploader and Administrators also see their non-available rows (with status) in list methods. Download, preview, share, and attach return `NotAvailable` for anything not `Available`.
+7. **Sharing**: owner or Administrator only; target is a user id or department name; duplicates are ignored; sharing notifies each recipient (`DocumentShared`); shared recipients can view/download only.
+8. **Attach to task**: requires access to the task and edit rights on the document; sets `TaskId` and `ProjectId` (the task's project).
+9. **Activity**: every upload, download, preview, edit, replace, delete, share, and scan outcome creates a `DocumentActivity` row.
 
 ## Reporting contract (Administrator only)
 

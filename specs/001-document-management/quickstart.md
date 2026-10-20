@@ -20,13 +20,17 @@ A validation guide for the finished feature. Details of entities and contracts a
 dotnet test ..\tests\ContosoDashboard.Tests
 ```
 
-Expected: all tests pass, covering the access matrix, upload validation and cleanup, storage path safety, and search/list filtering.
+Expected: all tests pass, covering the access matrix, upload validation and cleanup, storage path safety, search/list filtering, and the scan pipeline (state machine, idempotent and stale verdicts, timeout, restart recovery).
+
+## Cloud-phase validation (not part of the training build)
+
+With Azurite and the Functions Core Tools: run `DocumentScanFunction`, set `MalwareScan:Mode` to `AzureQueue`, upload a file, and confirm the request appears on `document-scan-requests`, the function writes a verdict to `document-scan-results`, and the document becomes *Available*; force a function failure and confirm the message reaches `document-scan-requests-poison` and the document turns *Scan failed* after the timeout.
 
 ## Manual validation scenarios
 
 | # | Scenario (spec reference) | Steps | Expected |
 |---|---------------------------|-------|----------|
-| 1 | Upload (US1) | As Employee, open Documents → Upload, pick a small PDF, enter title + category | Progress shown, success message, document in My Documents with date, size, uploader |
+| 1 | Upload (US1) | As Employee, open Documents → Upload, pick a small PDF, enter title + category | Progress shown, "Uploaded — scanning" message; within seconds the row changes from *Scanning* to *Available* with date, size, uploader |
 | 2 | Size/type limits (US1) | Try a file > 25 MB; try an `.exe` | Each rejected with a clear message; nothing stored |
 | 3 | Content mismatch (US1) | Rename a text file to `.pdf` and upload | Rejected as content mismatch |
 | 4 | Multi-file (US1) | Select three files, one invalid | Two succeed, one reports an error |
@@ -42,6 +46,10 @@ Expected: all tests pass, covering the access matrix, upload validation and clea
 | 14 | Audit/reports (US7) | Perform upload/download/share/delete; as Administrator open Document Reports; try as Employee | Reports show the activity; Employee is denied |
 | 15 | Failure cleanup | Make the upload folder read-only and upload | Error shown; no database record created |
 | 16 | Performance | Seed ~500 documents; open list and search; upload a 25 MB file | List and search under 2 s; upload under 30 s |
+| 17 | Quarantine (US1, FR-006) | Set `MalwareScan:SimulatedDelaySeconds` to 60 (Development), upload a file, then as another permitted user try its download URL and search | Uploader sees *Scanning*; others get 404 and no search hit; after the delay it becomes *Available* |
+| 18 | Rejected file (US1) | Set `MalwareScan:Scanner` to `Eicar` (Development), upload a text file containing the EICAR test string | Document shows *Rejected* to the uploader only, file removed from `AppData/uploads`, uploader notified |
+| 19 | Scan timeout (FR-028) | Set `PendingTimeoutMinutes` to 1 and `SimulatedDelaySeconds` to 300, upload, wait | Status becomes *Scan failed*, nothing accessible; Retry returns it to *Scanning* |
+| 20 | Restart recovery | Set `SimulatedDelaySeconds` to 120, upload, restart the app within that time | Pending document is re-queued and completes |
 
 ## Cleaning up between runs
 
