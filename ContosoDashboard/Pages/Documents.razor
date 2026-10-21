@@ -1,0 +1,406 @@
+@page "/documents"
+@using ContosoDashboard.Models
+@using ContosoDashboard.Services
+@using Microsoft.AspNetCore.Authorization
+@attribute [Authorize]
+@implements IDisposable
+@inject IDocumentService DocumentService
+@inject IProjectService ProjectService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<PageTitle>Documents - ContosoDashboard</PageTitle>
+
+<div class="container-fluid">
+    <div class="row mb-3">
+        <div class="col">
+            <h1>Documents</h1>
+        </div>
+        <div class="col-auto d-flex align-items-center">
+            <button type="button" class="btn btn-primary" @onclick="OpenUpload">
+                <i class="bi bi-upload"></i> Upload documents
+            </button>
+        </div>
+    </div>
+
+    @if (statusMessage != null)
+    {
+        <div class="alert alert-@statusKind alert-dismissible" role="alert">
+            @statusMessage
+            <button type="button" class="btn-close" aria-label="Dismiss" @onclick="() => statusMessage = null"></button>
+        </div>
+    }
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-lg-4 col-md-12">
+                    <label class="form-label small mb-0" for="docSearch">Search</label>
+                    <div class="input-group">
+                        <input id="docSearch" class="form-control" placeholder="Title, description, tags, uploader, or project"
+                               @bind="searchTerm" @bind:event="oninput" @onkeydown="OnSearchKey" />
+                        <button type="button" class="btn btn-outline-secondary" @onclick="ApplyFiltersAsync" aria-label="Search">
+                            <i class="bi bi-search"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="col-lg-2 col-md-4">
+                    <label class="form-label small mb-0" for="docCategory">Category</label>
+                    <select id="docCategory" class="form-select" @bind="categoryFilter">
+                        <option value="">All</option>
+                        @foreach (var c in DocumentCategories.All)
+                        {
+                            <option value="@c">@c</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-lg-2 col-md-4">
+                    <label class="form-label small mb-0" for="docProject">Project</label>
+                    <select id="docProject" class="form-select" @bind="projectFilter">
+                        <option value="">All</option>
+                        @foreach (var p in projects)
+                        {
+                            <option value="@p.ProjectId">@p.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-lg-1 col-md-2 col-6">
+                    <label class="form-label small mb-0" for="docFrom">From</label>
+                    <input id="docFrom" type="date" class="form-control" @bind="fromDate" />
+                </div>
+                <div class="col-lg-1 col-md-2 col-6">
+                    <label class="form-label small mb-0" for="docTo">To</label>
+                    <input id="docTo" type="date" class="form-control" @bind="toDate" />
+                </div>
+                <div class="col-lg-2 col-md-12 d-flex gap-2">
+                    <button type="button" class="btn btn-primary" @onclick="ApplyFiltersAsync">Apply</button>
+                    <button type="button" class="btn btn-outline-secondary" @onclick="ClearFiltersAsync">Clear</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (result == null)
+    {
+        <p><em>Loading...</em></p>
+    }
+    else
+    {
+        <h2 class="h5 mb-2">
+            @if (isSearch)
+            {
+                <span>Search results</span>
+                <small class="text-muted"> — documents you can access</small>
+            }
+            else
+            {
+                <span>My Documents</span>
+            }
+            <span class="badge bg-secondary ms-2">@result.TotalCount</span>
+        </h2>
+
+        @if (result.Items.Count == 0)
+        {
+            <div class="alert alert-info">
+                @if (isSearch || HasFilters)
+                {
+                    <span>No documents match your search or filters.</span>
+                }
+                else
+                {
+                    <span>You haven't uploaded any documents yet. Use <strong>Upload documents</strong> to add your first one.</span>
+                }
+            </div>
+        }
+        else
+        {
+            <DocumentList Items="result.Items"
+                          CanManage="CanManage"
+                          ShowUploader="isSearch"
+                          SortBy="query.SortBy"
+                          Descending="query.Descending"
+                          OnSort="SortAsync"
+                          OnPreview="OpenPreview"
+                          OnEdit="OpenEdit"
+                          OnDelete="AskDelete"
+                          OnRetry="RetryAsync" />
+
+            @if (totalPages > 1)
+            {
+                <nav aria-label="Document pages">
+                    <ul class="pagination justify-content-center">
+                        <li class="page-item @(query.Page <= 1 ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPageAsync(query.Page - 1)">Previous</button>
+                        </li>
+                        <li class="page-item disabled"><span class="page-link">Page @query.Page of @totalPages</span></li>
+                        <li class="page-item @(query.Page >= totalPages ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPageAsync(query.Page + 1)">Next</button>
+                        </li>
+                    </ul>
+                </nav>
+            }
+        }
+    }
+</div>
+
+<DocumentUploadDialog Visible="showUpload" User="user" OnClosed="CloseUpload" OnUploaded="LoadAsync" />
+<DocumentEditDialog Document="editing" User="user" OnClosed="CloseEdit" OnSaved="EditSavedAsync" />
+
+@if (previewing != null)
+{
+    <div class="modal-backdrop fade show"></div>
+    <div class="modal fade show d-block" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="previewTitle">@previewing.Title</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="ClosePreview"></button>
+                </div>
+                <div class="modal-body text-center">
+                    @if (previewing.FileType.StartsWith("image/"))
+                    {
+                        <img src="documents/@previewing.DocumentId/preview" class="img-fluid" alt="Preview of @previewing.Title" />
+                    }
+                    else
+                    {
+                        <iframe src="documents/@previewing.DocumentId/preview" title="Preview of @previewing.Title"
+                                style="width: 100%; height: 70vh; border: 0;"></iframe>
+                    }
+                </div>
+                <div class="modal-footer">
+                    <a class="btn btn-outline-primary" href="documents/@previewing.DocumentId/download" download>
+                        <i class="bi bi-download"></i> Download
+                    </a>
+                    <button type="button" class="btn btn-secondary" @onclick="ClosePreview">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@if (deleting != null)
+{
+    <div class="modal-backdrop fade show"></div>
+    <div class="modal fade show d-block" tabindex="-1" role="alertdialog" aria-modal="true" aria-labelledby="deleteTitle">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="deleteTitle">Delete document</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CancelDelete" disabled="@busy"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Permanently delete <strong>@deleting.Title</strong>? The file will be removed and cannot be recovered.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @onclick="CancelDelete" disabled="@busy">Cancel</button>
+                    <button type="button" class="btn btn-danger" @onclick="ConfirmDeleteAsync" disabled="@busy">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private UserContext? user;
+    private PagedResult<DocumentSummary>? result;
+    private List<Project> projects = new();
+    private readonly DocumentQuery query = new();
+
+    private string searchTerm = string.Empty;
+    private string categoryFilter = string.Empty;
+    private string projectFilter = string.Empty;
+    private DateTime? fromDate;
+    private DateTime? toDate;
+    private bool isSearch;
+
+    private bool showUpload;
+    private DocumentSummary? editing;
+    private DocumentSummary? previewing;
+    private DocumentSummary? deleting;
+
+    private string? statusMessage;
+    private string statusKind = "success";
+    private bool busy;
+    private Timer? refreshTimer;
+
+    private int totalPages => result == null ? 1 : Math.Max(1, (int)Math.Ceiling(result.TotalCount / (double)result.PageSize));
+
+    private bool HasFilters => !string.IsNullOrEmpty(categoryFilter) || !string.IsNullOrEmpty(projectFilter) || fromDate != null || toDate != null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        user = UserContext.FromPrincipal(authState.User);
+        projects = await ProjectService.GetUserProjectsAsync(user.UserId);
+        await LoadAsync();
+    }
+
+    private bool CanManage(DocumentSummary item)
+        => user != null && (item.UploaderUserId == user.UserId || user.IsAdministrator);
+
+    private async Task LoadAsync()
+    {
+        if (user == null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            query.Category = string.IsNullOrEmpty(categoryFilter) ? null : categoryFilter;
+            query.ProjectId = int.TryParse(projectFilter, out var projectId) ? projectId : null;
+            query.FromDate = fromDate;
+            query.ToDate = toDate;
+
+            isSearch = !string.IsNullOrWhiteSpace(searchTerm);
+            result = isSearch
+                ? await DocumentService.SearchAsync(searchTerm, query, user)
+                : await DocumentService.GetMyDocumentsAsync(query, user);
+        }
+        catch (Exception)
+        {
+            statusKind = "danger";
+            statusMessage = "Documents could not be loaded. Please try again.";
+        }
+        finally
+        {
+            busy = false;
+        }
+
+        UpdateRefreshTimer();
+    }
+
+    // While any document is still being scanned, refresh periodically so its status updates on its own
+    private void UpdateRefreshTimer()
+    {
+        var anyPending = result?.Items.Any(d => d.ScanStatus == ScanStatuses.Pending) == true;
+
+        if (anyPending && refreshTimer == null)
+        {
+            refreshTimer = new Timer(_ => _ = InvokeAsync(async () =>
+            {
+                await LoadAsync();
+                StateHasChanged();
+            }), null, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(4));
+        }
+        else if (!anyPending && refreshTimer != null)
+        {
+            refreshTimer.Dispose();
+            refreshTimer = null;
+        }
+    }
+
+    private async Task ApplyFiltersAsync()
+    {
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task ClearFiltersAsync()
+    {
+        searchTerm = string.Empty;
+        categoryFilter = string.Empty;
+        projectFilter = string.Empty;
+        fromDate = null;
+        toDate = null;
+        query.SortBy = DocumentQuery.SortUploadDate;
+        query.Descending = true;
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task OnSearchKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await ApplyFiltersAsync();
+        }
+    }
+
+    private async Task SortAsync(string column)
+    {
+        if (query.SortBy == column)
+        {
+            query.Descending = !query.Descending;
+        }
+        else
+        {
+            query.SortBy = column;
+            query.Descending = column is DocumentQuery.SortUploadDate or DocumentQuery.SortFileSize;
+        }
+
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task GoToPageAsync(int page)
+    {
+        query.Page = Math.Clamp(page, 1, totalPages);
+        await LoadAsync();
+    }
+
+    private void OpenUpload() => showUpload = true;
+
+    private void CloseUpload() => showUpload = false;
+
+    private void OpenPreview(DocumentSummary item) => previewing = item;
+
+    private void ClosePreview() => previewing = null;
+
+    private void OpenEdit(DocumentSummary item) => editing = item;
+
+    private void CloseEdit() => editing = null;
+
+    private async Task EditSavedAsync()
+    {
+        editing = null;
+        statusKind = "success";
+        statusMessage = "Document saved.";
+        await LoadAsync();
+    }
+
+    private void AskDelete(DocumentSummary item) => deleting = item;
+
+    private void CancelDelete() => deleting = null;
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (deleting == null || user == null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            var outcome = await DocumentService.DeleteAsync(deleting.DocumentId, user);
+            statusKind = outcome.Success ? "success" : "danger";
+            statusMessage = outcome.Success ? $"'{deleting.Title}' was deleted." : outcome.Message;
+        }
+        finally
+        {
+            busy = false;
+            deleting = null;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task RetryAsync(DocumentSummary item)
+    {
+        if (user == null)
+        {
+            return;
+        }
+
+        var outcome = await DocumentService.RetryScanAsync(item.DocumentId, user);
+        statusKind = outcome.Success ? "success" : "danger";
+        statusMessage = outcome.Message;
+        await LoadAsync();
+    }
+
+    public void Dispose()
+    {
+        refreshTimer?.Dispose();
+    }
+}

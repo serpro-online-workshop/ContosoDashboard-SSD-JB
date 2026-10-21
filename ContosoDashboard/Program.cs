@@ -3,6 +3,8 @@ using ContosoDashboard.Data;
 using ContosoDashboard.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.Extensions.Options;
+using ContosoDashboard.Endpoints;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,6 +46,57 @@ builder.Services.AddScoped<IProjectService, ProjectService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IDashboardService, DashboardService>();
 
+// Document storage (local filesystem outside wwwroot; swap the provider for cloud storage later)
+builder.Services.Configure<DocumentStorageOptions>(builder.Configuration.GetSection(DocumentStorageOptions.SectionName));
+builder.Services.AddSingleton<IFileStorageService>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<DocumentStorageOptions>>().Value;
+    var environment = sp.GetRequiredService<IHostEnvironment>();
+
+    if (!string.Equals(options.Provider, "Local", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new NotSupportedException($"Document storage provider '{options.Provider}' is not available in this build.");
+    }
+
+    return new LocalFileStorageService(
+        LocalFileStorageService.ResolveRoot(options, environment.ContentRootPath),
+        sp.GetRequiredService<ILogger<LocalFileStorageService>>());
+});
+builder.Services.AddScoped<DocumentAccess>();
+
+// Asynchronous malware scanning: in-process queue and worker (training build), same contract as the cloud pipeline
+builder.Services.Configure<MalwareScanOptions>(builder.Configuration.GetSection(MalwareScanOptions.SectionName));
+var malwareScan = builder.Configuration.GetSection(MalwareScanOptions.SectionName).Get<MalwareScanOptions>() ?? new MalwareScanOptions();
+
+if (!string.Equals(malwareScan.Mode, "InProcess", StringComparison.OrdinalIgnoreCase))
+{
+    throw new NotSupportedException($"Malware scan mode '{malwareScan.Mode}' is not available in this build.");
+}
+
+if (!builder.Environment.IsDevelopment() &&
+    (string.Equals(malwareScan.Scanner, "Eicar", StringComparison.OrdinalIgnoreCase) || malwareScan.SimulatedDelaySeconds > 0))
+{
+    throw new InvalidOperationException("MalwareScan:Scanner 'Eicar' and MalwareScan:SimulatedDelaySeconds are for the Development environment only.");
+}
+
+if (string.Equals(malwareScan.Scanner, "Eicar", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IMalwareScanner, EicarScanner>();
+}
+else
+{
+    builder.Services.AddSingleton<IMalwareScanner, NoOpMalwareScanner>();
+}
+
+builder.Services.AddSingleton<InProcessScanQueue>();
+builder.Services.AddSingleton<IScanQueue>(sp => sp.GetRequiredService<InProcessScanQueue>());
+builder.Services.AddScoped<DocumentService>();
+builder.Services.AddScoped<IDocumentService>(sp => sp.GetRequiredService<DocumentService>());
+builder.Services.AddScoped<IScanResultHandler>(sp => sp.GetRequiredService<DocumentService>());
+builder.Services.AddScoped<IScanMaintenance>(sp => sp.GetRequiredService<DocumentService>());
+builder.Services.AddHostedService<ScanWorker>();
+builder.Services.AddHostedService<ScanTimeoutSweeper>();
+
 // Add HttpContextAccessor for accessing user claims
 builder.Services.AddHttpContextAccessor();
 
@@ -56,7 +109,7 @@ using (var scope = app.Services.CreateScope())
     try
     {
         var context = services.GetRequiredService<ApplicationDbContext>();
-        context.Database.EnsureCreated(); // For development - use migrations in production
+        context.Database.Migrate();
     }
     catch (Exception ex)
     {
@@ -105,6 +158,7 @@ app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.MapDocumentEndpoints();
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 

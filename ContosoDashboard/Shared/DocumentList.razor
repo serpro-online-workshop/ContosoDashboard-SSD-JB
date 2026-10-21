@@ -1,0 +1,155 @@
+@namespace ContosoDashboard.Shared
+@using ContosoDashboard.Models
+@using ContosoDashboard.Services
+
+<div class="table-responsive">
+    <table class="table table-hover align-middle">
+        <thead>
+            <tr>
+                <th scope="col" aria-sort="@AriaSort(DocumentQuery.SortTitle)">
+                    <button type="button" class="btn btn-link p-0 text-decoration-none text-body fw-bold" @onclick="() => OnSort.InvokeAsync(DocumentQuery.SortTitle)">
+                        Title @SortIcon(DocumentQuery.SortTitle)
+                    </button>
+                </th>
+                <th scope="col" aria-sort="@AriaSort(DocumentQuery.SortCategory)">
+                    <button type="button" class="btn btn-link p-0 text-decoration-none text-body fw-bold" @onclick="() => OnSort.InvokeAsync(DocumentQuery.SortCategory)">
+                        Category @SortIcon(DocumentQuery.SortCategory)
+                    </button>
+                </th>
+                <th scope="col">Project</th>
+                @if (ShowUploader)
+                {
+                    <th scope="col">Uploaded by</th>
+                }
+                <th scope="col" aria-sort="@AriaSort(DocumentQuery.SortUploadDate)">
+                    <button type="button" class="btn btn-link p-0 text-decoration-none text-body fw-bold" @onclick="() => OnSort.InvokeAsync(DocumentQuery.SortUploadDate)">
+                        Uploaded @SortIcon(DocumentQuery.SortUploadDate)
+                    </button>
+                </th>
+                <th scope="col" aria-sort="@AriaSort(DocumentQuery.SortFileSize)">
+                    <button type="button" class="btn btn-link p-0 text-decoration-none text-body fw-bold" @onclick="() => OnSort.InvokeAsync(DocumentQuery.SortFileSize)">
+                        Size @SortIcon(DocumentQuery.SortFileSize)
+                    </button>
+                </th>
+                <th scope="col">Status</th>
+                <th scope="col" class="text-end">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in Items)
+            {
+                var available = item.ScanStatus == ScanStatuses.Available;
+                <tr @key="item.DocumentId">
+                    <td>
+                        <div class="fw-semibold">@item.Title</div>
+                        @if (!string.IsNullOrWhiteSpace(item.Tags))
+                        {
+                            <div>
+                                @foreach (var tag in item.Tags.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                                {
+                                    <span class="badge bg-light text-dark border me-1">@tag</span>
+                                }
+                            </div>
+                        }
+                    </td>
+                    <td>@item.Category</td>
+                    <td>@(item.ProjectName ?? "—")</td>
+                    @if (ShowUploader)
+                    {
+                        <td>@item.UploaderName</td>
+                    }
+                    <td>@item.UploadDate.ToLocalTime().ToString("MMM dd, yyyy")</td>
+                    <td>@FormatSize(item.FileSize)</td>
+                    <td>
+                        @switch (item.ScanStatus)
+                        {
+                            case ScanStatuses.Pending:
+                                <span class="badge bg-warning text-dark" title="Scanning for malware. The document is unavailable until the scan finishes.">
+                                    <span class="spinner-border spinner-border-sm" aria-hidden="true"></span> Scanning
+                                </span>
+                                break;
+                            case ScanStatuses.Available:
+                                <span class="badge bg-success">Available</span>
+                                break;
+                            case ScanStatuses.Rejected:
+                                <span class="badge bg-danger" title="@item.ScanDetail">Rejected</span>
+                                @if (!string.IsNullOrWhiteSpace(item.ScanDetail))
+                                {
+                                    <div class="small text-danger">@item.ScanDetail</div>
+                                }
+                                break;
+                            default:
+                                <span class="badge bg-dark" title="@item.ScanDetail">Scan failed</span>
+                                break;
+                        }
+                    </td>
+                    <td class="text-end text-nowrap">
+                        @if (available)
+                        {
+                            <a class="btn btn-sm btn-outline-primary" href="documents/@item.DocumentId/download" download
+                               title="Download @item.Title" aria-label="Download @item.Title">
+                                <i class="bi bi-download"></i>
+                            </a>
+                            @if (IsPreviewable(item))
+                            {
+                                <button type="button" class="btn btn-sm btn-outline-secondary" title="Preview" aria-label="Preview @item.Title"
+                                        @onclick="() => OnPreview.InvokeAsync(item)">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            }
+                        }
+                        @if (CanManage(item))
+                        {
+                            @if (item.ScanStatus == ScanStatuses.ScanFailed)
+                            {
+                                <button type="button" class="btn btn-sm btn-outline-warning" title="Retry scan" aria-label="Retry scan for @item.Title"
+                                        @onclick="() => OnRetry.InvokeAsync(item)">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                            }
+                            @if (available || item.ScanStatus == ScanStatuses.Pending)
+                            {
+                                <button type="button" class="btn btn-sm btn-outline-secondary" title="Edit" aria-label="Edit @item.Title" disabled="@(!available)"
+                                        @onclick="() => OnEdit.InvokeAsync(item)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            }
+                            <button type="button" class="btn btn-sm btn-outline-danger" title="Delete" aria-label="Delete @item.Title"
+                                    @onclick="() => OnDelete.InvokeAsync(item)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DocumentSummary> Items { get; set; } = Array.Empty<DocumentSummary>();
+    [Parameter] public Func<DocumentSummary, bool> CanManage { get; set; } = _ => false;
+    [Parameter] public bool ShowUploader { get; set; }
+    [Parameter] public string SortBy { get; set; } = DocumentQuery.SortUploadDate;
+    [Parameter] public bool Descending { get; set; } = true;
+    [Parameter] public EventCallback<string> OnSort { get; set; }
+    [Parameter] public EventCallback<DocumentSummary> OnPreview { get; set; }
+    [Parameter] public EventCallback<DocumentSummary> OnEdit { get; set; }
+    [Parameter] public EventCallback<DocumentSummary> OnDelete { get; set; }
+    [Parameter] public EventCallback<DocumentSummary> OnRetry { get; set; }
+
+    private static bool IsPreviewable(DocumentSummary item) => DocumentFileValidator.IsPreviewable(item.FileType);
+
+    private string SortIcon(string column)
+        => SortBy != column ? string.Empty : (Descending ? "▼" : "▲");
+
+    private string AriaSort(string column)
+        => SortBy != column ? "none" : (Descending ? "descending" : "ascending");
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / (1024.0 * 1024.0):0.#} MB";
+    }
+}

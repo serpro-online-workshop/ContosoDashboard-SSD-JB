@@ -1,0 +1,210 @@
+@namespace ContosoDashboard.Shared
+@using Microsoft.AspNetCore.Components.Forms
+@using ContosoDashboard.Models
+@using ContosoDashboard.Services
+@inject IDocumentService DocumentService
+
+@if (Document != null)
+{
+    <div class="modal-backdrop fade show"></div>
+    <div class="modal fade show d-block" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="editDialogTitle">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editDialogTitle">Edit document</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CloseAsync" disabled="@busy"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label" for="editTitle">Title <span class="text-danger">*</span></label>
+                        <input id="editTitle" class="form-control" @bind="title" maxlength="255" />
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="editCategory">Category <span class="text-danger">*</span></label>
+                        <select id="editCategory" class="form-select" @bind="category">
+                            @foreach (var c in DocumentCategories.All)
+                            {
+                                <option value="@c">@c</option>
+                            }
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="editDescription">Description</label>
+                        <textarea id="editDescription" class="form-control" rows="2" maxlength="2000" @bind="description"></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="editTags">Tags</label>
+                        <input id="editTags" class="form-control" @bind="tags" placeholder="Comma-separated" />
+                    </div>
+
+                    <hr />
+
+                    <div class="mb-1">
+                        <label class="form-label" for="replaceFile">Replace file (optional)</label>
+                        <InputFile @key="inputKey" id="replaceFile" class="form-control" OnChange="OnFileSelected" accept="@acceptedTypes" />
+                        <div class="form-text">
+                            @if (replacementName != null)
+                            {
+                                <span>Selected: <strong>@replacementName</strong>. </span>
+                            }
+                            The document becomes unavailable until the new file passes the malware scan.
+                        </div>
+                    </div>
+
+                    @if (error != null)
+                    {
+                        <div class="alert alert-danger mt-3" role="alert">@error</div>
+                    }
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @onclick="CloseAsync" disabled="@busy">Cancel</button>
+                    <button type="button" class="btn btn-primary" @onclick="SaveAsync" disabled="@busy">
+                        @if (busy)
+                        {
+                            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                        }
+                        Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public DocumentSummary? Document { get; set; }
+    [Parameter, EditorRequired] public UserContext? User { get; set; }
+    [Parameter] public EventCallback OnClosed { get; set; }
+    [Parameter] public EventCallback OnSaved { get; set; }
+
+    private const long MaxFileSizeBytes = DocumentFileValidator.DefaultMaxFileSizeBytes;
+    private static readonly string acceptedTypes = string.Join(",", DocumentFileValidator.AllowedExtensions.Keys);
+
+    private int? loadedDocumentId;
+    private string title = string.Empty;
+    private string category = DocumentCategories.Other;
+    private string? description;
+    private string? tags;
+    private string? error;
+    private bool busy;
+    private int inputKey;
+    private IBrowserFile? replacement;
+    private string? replacementName;
+
+    protected override void OnParametersSet()
+    {
+        if (Document == null)
+        {
+            loadedDocumentId = null;
+            return;
+        }
+
+        if (loadedDocumentId != Document.DocumentId)
+        {
+            loadedDocumentId = Document.DocumentId;
+            title = Document.Title;
+            category = Document.Category;
+            description = Document.Description;
+            tags = Document.Tags;
+            error = null;
+            replacement = null;
+            replacementName = null;
+            inputKey++;
+        }
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        error = null;
+        replacement = e.File;
+        replacementName = e.File.Name;
+
+        if (e.File.Size > MaxFileSizeBytes)
+        {
+            error = $"The file is too large. The maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            replacement = null;
+            replacementName = null;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (Document == null || User == null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        error = null;
+
+        try
+        {
+            var metadata = await DocumentService.UpdateMetadataAsync(
+                Document.DocumentId, new DocumentMetadata(title, description, category, tags), User);
+
+            if (!metadata.Success)
+            {
+                error = metadata.Message;
+                return;
+            }
+
+            if (replacement != null)
+            {
+                // Capture details first, copy to memory, then drop the browser-file reference
+                var fileName = replacement.Name;
+                var contentType = replacement.ContentType;
+                var memory = new MemoryStream();
+                await using (var stream = replacement.OpenReadStream(MaxFileSizeBytes))
+                {
+                    await stream.CopyToAsync(memory);
+                }
+
+                memory.Position = 0;
+                replacement = null;
+
+                var replaced = await DocumentService.ReplaceFileAsync(
+                    Document.DocumentId,
+                    new UploadFile { FileName = fileName, ContentType = contentType, Stream = memory },
+                    User);
+
+                if (!replaced.Success)
+                {
+                    error = "Details were saved, but the file was not replaced: " + replaced.Message;
+                    replacementName = null;
+                    inputKey++;
+                    await OnSaved.InvokeAsync();
+                    return;
+                }
+            }
+
+            loadedDocumentId = null;
+            await OnSaved.InvokeAsync();
+        }
+        catch (IOException)
+        {
+            error = $"The file is too large. The maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.";
+        }
+        catch (Exception)
+        {
+            error = "The document could not be saved. Please try again.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        if (!busy)
+        {
+            loadedDocumentId = null;
+            await OnClosed.InvokeAsync();
+        }
+    }
+}

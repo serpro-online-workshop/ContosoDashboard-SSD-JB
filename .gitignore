@@ -354,3 +354,6 @@ MigrationBackup/
 *.db
 *.db-shm
 *.db-wal
+
+# Uploaded documents (Document Upload and Management)
+ContosoDashboard/AppData/

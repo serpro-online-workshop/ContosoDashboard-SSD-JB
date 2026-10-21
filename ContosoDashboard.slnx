@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/ContosoDashboard.Tests/ContosoDashboard.Tests.csproj" />
+  </Folder>
+  <Project Path="ContosoDashboard/ContosoDashboard.csproj" />
+</Solution>

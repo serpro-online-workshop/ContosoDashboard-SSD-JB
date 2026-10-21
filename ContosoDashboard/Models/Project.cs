@@ -35,6 +35,7 @@ public class Project
 
     public virtual ICollection<TaskItem> Tasks { get; set; } = new List<TaskItem>();
     public virtual ICollection<ProjectMember> ProjectMembers { get; set; } = new List<ProjectMember>();
+    public virtual ICollection<Document> Documents { get; set; } = new List<Document>();
 
     // Computed property
     [NotMapped]

@@ -1,0 +1,359 @@
+@namespace ContosoDashboard.Shared
+@using Microsoft.AspNetCore.Components.Forms
+@using ContosoDashboard.Models
+@using ContosoDashboard.Services
+@inject IDocumentService DocumentService
+@inject IProjectService ProjectService
+
+@if (Visible)
+{
+    <div class="modal-backdrop fade show"></div>
+    <div class="modal fade show d-block" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uploadDialogTitle">Upload documents</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CloseAsync" disabled="@uploading"></button>
+                </div>
+
+                <div class="modal-body">
+                    @if (results.Count > 0 && !uploading)
+                    {
+                        <h6>Results</h6>
+                        <ul class="list-group mb-3">
+                            @foreach (var result in results)
+                            {
+                                <li class="list-group-item d-flex justify-content-between align-items-start">
+                                    <span>@result.FileName</span>
+                                    @if (result.Success)
+                                    {
+                                        <span class="text-success"><i class="bi bi-check-circle"></i> @result.Message</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-danger" role="alert"><i class="bi bi-x-circle"></i> @result.Message</span>
+                                    }
+                                </li>
+                            }
+                        </ul>
+                    }
+
+                    @if (uploading)
+                    {
+                        <div class="mb-3" role="status" aria-live="polite">
+                            <div class="d-flex justify-content-between small mb-1">
+                                <span>Uploading @currentFileName (@(completed + 1) of @totalToUpload)</span>
+                                <span>@(totalToUpload == 0 ? 0 : completed * 100 / totalToUpload)%</span>
+                            </div>
+                            <div class="progress">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+                                     style="width: @(totalToUpload == 0 ? 0 : (completed * 100 + 50) / totalToUpload)%"
+                                     aria-valuenow="@(totalToUpload == 0 ? 0 : completed * 100 / totalToUpload)" aria-valuemin="0" aria-valuemax="100"></div>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="mb-3">
+                            <label class="form-label" for="uploadFiles">Files <span class="text-danger">*</span></label>
+                            <InputFile @key="inputKey" id="uploadFiles" class="form-control" OnChange="OnFilesSelected" multiple
+                                       accept="@acceptedTypes" />
+                            <div class="form-text">Supported: @DocumentFileValidator.SupportedTypesText. Maximum @(MaxFileSizeBytes / (1024 * 1024)) MB per file.</div>
+                        </div>
+
+                        @if (pending.Count > 0)
+                        {
+                            <div class="mb-3">
+                                @foreach (var item in pending)
+                                {
+                                    <div class="mb-2">
+                                        <label class="form-label small mb-0">Title for <strong>@item.FileName</strong> <span class="text-danger">*</span></label>
+                                        <input class="form-control form-control-sm" @bind="item.Title" @bind:event="oninput" maxlength="255" />
+                                        @if (item.Error != null)
+                                        {
+                                            <div class="text-danger small" role="alert">@item.Error</div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label" for="uploadCategory">Category <span class="text-danger">*</span></label>
+                                    <select id="uploadCategory" class="form-select" @bind="category">
+                                        <option value="">Select a category...</option>
+                                        @foreach (var c in DocumentCategories.All)
+                                        {
+                                            <option value="@c">@c</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label" for="uploadProject">Project</label>
+                                    <select id="uploadProject" class="form-select" @bind="projectId">
+                                        <option value="">None (personal)</option>
+                                        @foreach (var p in projects)
+                                        {
+                                            <option value="@p.ProjectId">@p.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label" for="uploadDescription">Description</label>
+                                <textarea id="uploadDescription" class="form-control" rows="2" maxlength="2000" @bind="description"></textarea>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label" for="uploadTags">Tags</label>
+                                <input id="uploadTags" class="form-control" @bind="tags" placeholder="Comma-separated, e.g. budget, 2026" />
+                            </div>
+                        }
+
+                        @if (formError != null)
+                        {
+                            <div class="alert alert-danger" role="alert">@formError</div>
+                        }
+                    }
+                </div>
+
+                <div class="modal-footer">
+                    @if (results.Count > 0 && !uploading)
+                    {
+                        <button type="button" class="btn btn-primary" @onclick="CloseAsync">Done</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn btn-secondary" @onclick="CloseAsync" disabled="@uploading">Cancel</button>
+                        <button type="button" class="btn btn-primary" @onclick="UploadAsync" disabled="@(uploading || pending.Count == 0)">
+                            <i class="bi bi-upload"></i> Upload
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter, EditorRequired] public UserContext? User { get; set; }
+    [Parameter] public int? DefaultProjectId { get; set; }
+    [Parameter] public EventCallback OnClosed { get; set; }
+    [Parameter] public EventCallback OnUploaded { get; set; }
+
+    private const int MaxFilesPerBatch = 10;
+    private const long MaxFileSizeBytes = DocumentFileValidator.DefaultMaxFileSizeBytes;
+    private static readonly string acceptedTypes = string.Join(",", DocumentFileValidator.AllowedExtensions.Keys);
+
+    private sealed class PendingFile
+    {
+        public IBrowserFile? File { get; set; }
+        public string FileName { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string? Error { get; set; }
+    }
+
+    private sealed record FileResult(string FileName, bool Success, string Message);
+
+    private readonly List<PendingFile> pending = new();
+    private readonly List<FileResult> results = new();
+    private List<Project> projects = new();
+
+    private string category = string.Empty;
+    private string? projectId;
+    private string? description;
+    private string? tags;
+    private string? formError;
+    private bool uploading;
+    private bool wasVisible;
+    private bool anyUploaded;
+    private int inputKey;
+    private int completed;
+    private int totalToUpload;
+    private string currentFileName = string.Empty;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Visible && !wasVisible && User != null)
+        {
+            ResetForm();
+            projectId = DefaultProjectId?.ToString();
+            projects = await ProjectService.GetUserProjectsAsync(User.UserId);
+        }
+
+        wasVisible = Visible;
+    }
+
+    private void ResetForm()
+    {
+        pending.Clear();
+        results.Clear();
+        category = string.Empty;
+        description = null;
+        tags = null;
+        formError = null;
+        uploading = false;
+        anyUploaded = false;
+        completed = 0;
+        inputKey++;
+    }
+
+    private void OnFilesSelected(InputFileChangeEventArgs e)
+    {
+        formError = null;
+        pending.Clear();
+
+        var files = e.GetMultipleFiles(MaxFilesPerBatch);
+        if (e.FileCount > MaxFilesPerBatch)
+        {
+            formError = $"You can upload at most {MaxFilesPerBatch} files at a time; the first {MaxFilesPerBatch} were selected.";
+        }
+
+        foreach (var file in files)
+        {
+            var item = new PendingFile
+            {
+                File = file,
+                FileName = file.Name,
+                Title = Path.GetFileNameWithoutExtension(file.Name)
+            };
+
+            // Early, friendly feedback; the server validates everything again
+            var extension = Path.GetExtension(file.Name);
+            if (!DocumentFileValidator.AllowedExtensions.ContainsKey(extension))
+            {
+                item.Error = $"This file type is not supported. Supported types: {DocumentFileValidator.SupportedTypesText}.";
+            }
+            else if (file.Size == 0)
+            {
+                item.Error = "The file is empty.";
+            }
+            else if (file.Size > MaxFileSizeBytes)
+            {
+                item.Error = $"The file is too large. The maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            }
+
+            pending.Add(item);
+        }
+    }
+
+    private async Task UploadAsync()
+    {
+        if (User == null || uploading)
+        {
+            return;
+        }
+
+        formError = null;
+
+        if (string.IsNullOrWhiteSpace(category))
+        {
+            formError = "Please choose a category.";
+            return;
+        }
+
+        if (pending.Any(p => string.IsNullOrWhiteSpace(p.Title) && p.Error == null))
+        {
+            formError = "Every file needs a title.";
+            return;
+        }
+
+        var toUpload = pending.Where(p => p.Error == null).ToList();
+        results.Clear();
+
+        // Files rejected up front are reported alongside the upload results
+        foreach (var rejected in pending.Where(p => p.Error != null))
+        {
+            results.Add(new FileResult(rejected.FileName, false, rejected.Error!));
+        }
+
+        if (toUpload.Count == 0)
+        {
+            return;
+        }
+
+        uploading = true;
+        completed = 0;
+        totalToUpload = toUpload.Count;
+        int? project = int.TryParse(projectId, out var parsed) ? parsed : null;
+
+        // Files are processed one at a time to bound memory use in the server-side circuit
+        foreach (var item in toUpload)
+        {
+            currentFileName = item.FileName;
+            StateHasChanged();
+
+            results.Add(await UploadOneAsync(item, project));
+            completed++;
+        }
+
+        uploading = false;
+        pending.Clear();
+        inputKey++; // forces the InputFile to render fresh after an upload
+
+        if (anyUploaded)
+        {
+            await OnUploaded.InvokeAsync();
+        }
+    }
+
+    private async Task<FileResult> UploadOneAsync(PendingFile item, int? project)
+    {
+        // Capture metadata before opening the stream, then copy to memory so the browser stream's lifetime
+        // does not matter, and drop the browser-file reference so it cannot be reused.
+        var browserFile = item.File!;
+        var fileName = browserFile.Name;
+        var contentType = browserFile.ContentType;
+        var title = item.Title;
+
+        try
+        {
+            var memory = new MemoryStream();
+            await using (var stream = browserFile.OpenReadStream(MaxFileSizeBytes))
+            {
+                await stream.CopyToAsync(memory);
+            }
+
+            memory.Position = 0;
+            item.File = null;
+
+            var result = await DocumentService.UploadAsync(new UploadRequest
+            {
+                Title = title,
+                Description = description,
+                Category = category,
+                ProjectId = project,
+                Tags = tags,
+                File = new UploadFile { FileName = fileName, ContentType = contentType, Stream = memory }
+            }, User!);
+
+            if (result.Success)
+            {
+                anyUploaded = true;
+            }
+
+            return new FileResult(fileName, result.Success, result.Message);
+        }
+        catch (IOException)
+        {
+            return new FileResult(fileName, false, $"The file is too large. The maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.");
+        }
+        catch (Exception)
+        {
+            return new FileResult(fileName, false, "The file could not be uploaded. Please try again.");
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        if (uploading)
+        {
+            return;
+        }
+
+        ResetForm();
+        await OnClosed.InvokeAsync();
+    }
+}
